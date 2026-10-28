@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useRevalora } from '../../context/RevaloraContext';
 import type { MaterialCategory, MaterialCondition, ScrapItem } from '../../types';
+import { isSupabaseConfigured, supabase } from '../../lib/supabase';
 import {
   X,
   Plus,
@@ -11,20 +12,33 @@ import {
   Clock,
   ShieldCheck,
   CheckCircle2,
+  MapPin,
 } from 'lucide-react';
 
 interface CreateListingModalProps {
   isOpen: boolean;
   onClose: () => void;
   preselectedCategory?: MaterialCategory;
+  onListingCreated?: () => void;
 }
+
+const getTomorrowDate = () => {
+  const date = new Date();
+  date.setDate(date.getDate() + 1);
+  return [
+    date.getFullYear(),
+    String(date.getMonth() + 1).padStart(2, '0'),
+    String(date.getDate()).padStart(2, '0'),
+  ].join('-');
+};
 
 export const CreateListingModal: React.FC<CreateListingModalProps> = ({
   isOpen,
   onClose,
   preselectedCategory,
+  onListingCreated,
 }) => {
-  const { benchmarks, currentUser, createListing } = useRevalora();
+  const { benchmarks } = useRevalora();
 
   const [items, setItems] = useState<ScrapItem[]>([
     {
@@ -35,9 +49,13 @@ export const CreateListingModal: React.FC<CreateListingModalProps> = ({
     },
   ]);
 
-  const [preferredPickupDate, setPreferredPickupDate] = useState<string>('Tomorrow, Oct 29');
-  const [timeSlot, setTimeSlot] = useState<string>('10:00 AM - 12:00 PM');
-  const [generalNotes, setGeneralNotes] = useState<string>('');
+  const [locality, setLocality] = useState('');
+  const [society, setSociety] = useState('');
+  const [preferredPickupDate, setPreferredPickupDate] = useState<string>(getTomorrowDate);
+  const [timeSlot, setTimeSlot] = useState<string>('09:00 AM - 11:00 AM');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState('');
+  const [submitSuccess, setSubmitSuccess] = useState('');
 
   // AI Assistant state
   const [isScanning, setIsScanning] = useState<boolean>(false);
@@ -158,18 +176,132 @@ export const CreateListingModal: React.FC<CreateListingModalProps> = ({
     }
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (totalEstimatedWeight <= 0) return;
+    setSubmitError('');
+    setSubmitSuccess('');
 
-    createListing({
-      items,
-      preferredPickupDate,
-      timeSlot,
-      notes: generalNotes,
-    });
+    if (!locality.trim() || !society.trim()) {
+      setSubmitError('Enter your locality and society to create a listing.');
+      return;
+    }
 
-    onClose();
+    if (items.some((item) => !Number.isFinite(Number(item.estimatedWeightKg)) || Number(item.estimatedWeightKg) <= 0)) {
+      setSubmitError('Each material line must have a weight greater than zero.');
+      return;
+    }
+
+    if (!isSupabaseConfigured) {
+      setSubmitError('Supabase is not configured in this frontend. Add the required Vite settings and reload the app.');
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      const { data: authData, error: authError } = await supabase.auth.getUser();
+      if (authError || !authData.user) {
+        setSubmitError('Please sign in with a Supabase household account before creating a listing. The demo profile is not an authenticated account.');
+        return;
+      }
+
+      const { data: profile, error: profileError } = await supabase
+        .from('profiles')
+        .select('role')
+        .eq('id', authData.user.id)
+        .maybeSingle();
+
+      if (profileError || !profile) {
+        setSubmitError('Could not verify your household profile. Please confirm your account setup and try again.');
+        return;
+      }
+      if (profile.role !== 'household') {
+        setSubmitError('Only a household account can create a household scrap listing.');
+        return;
+      }
+
+      const categories = [...new Set(items.map((item) => item.category))];
+      const { data: priceRows, error: pricesError } = await supabase
+        .from('material_benchmarks')
+        .select('category, reference_rate_per_kg')
+        .in('category', categories);
+
+      if (pricesError || !priceRows) {
+        setSubmitError('Could not load current material benchmarks, so the listing was not created. Please try again later.');
+        return;
+      }
+
+      const ratesByCategory = new Map(
+        priceRows.map((row) => [row.category, Number(row.reference_rate_per_kg)])
+      );
+      if (categories.some((category) => !ratesByCategory.has(category))) {
+        setSubmitError('A current benchmark is missing for one of the selected materials. The listing was not created.');
+        return;
+      }
+
+      const totalWeight = items.reduce((sum, item) => sum + Number(item.estimatedWeightKg), 0);
+      const estimatedEarnings = items.reduce(
+        (sum, item) => sum + Number(item.estimatedWeightKg) * (ratesByCategory.get(item.category) ?? 0),
+        0
+      );
+
+      const { data: listing, error: listingError } = await supabase
+        .from('scrap_listings')
+        .insert({
+          household_id: authData.user.id,
+          locality: locality.trim(),
+          society: society.trim(),
+          total_estimated_weight_kg: totalWeight,
+          estimated_earnings: estimatedEarnings,
+          preferred_pickup_date: preferredPickupDate,
+          time_slot: timeSlot,
+          status: 'open',
+        })
+        .select('id')
+        .single();
+
+      if (listingError || !listing) {
+        setSubmitError(
+          listingError?.code === '42501'
+            ? 'Supabase did not allow this listing. Check that you are signed in as the listing owner and that your account has household permissions.'
+            : 'Could not save the listing. Check your connection and account permissions, then try again.'
+        );
+        return;
+      }
+
+      const itemRows = items.map((item) => ({
+        listing_id: listing.id,
+        category: item.category,
+        estimated_weight_kg: Number(item.estimatedWeightKg),
+        condition: item.condition,
+        notes: item.notes?.trim() || null,
+      }));
+      const { error: itemsError } = await supabase
+        .from('scrap_listing_items')
+        .insert(itemRows);
+
+      if (itemsError) {
+        const { error: cleanupError } = await supabase
+          .from('scrap_listings')
+          .delete()
+          .eq('id', listing.id)
+          .eq('household_id', authData.user.id);
+
+        setSubmitError(
+          cleanupError
+            ? 'The listing was created, but its material details failed to save and automatic cleanup also failed. Please contact support.'
+            : 'The material details could not be saved, so the incomplete listing was removed. Please try again.'
+        );
+        return;
+      }
+
+      setSubmitSuccess('Your scrap listing was saved successfully.');
+      onListingCreated?.();
+      window.setTimeout(onClose, 900);
+    } catch {
+      setSubmitError('A network error interrupted the request. Please check your connection and try again.');
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (
@@ -275,6 +407,37 @@ export const CreateListingModal: React.FC<CreateListingModalProps> = ({
             )}
           </div>
 
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div>
+              <label htmlFor="listing-locality" className="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-1.5">
+                Locality
+              </label>
+              <input
+                id="listing-locality"
+                required
+                maxLength={120}
+                value={locality}
+                onChange={(event) => setLocality(event.target.value)}
+                placeholder="Your neighborhood"
+                className="w-full text-sm px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl"
+              />
+            </div>
+            <div>
+              <label htmlFor="listing-society" className="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-1.5">
+                Society / Community
+              </label>
+              <input
+                id="listing-society"
+                required
+                maxLength={120}
+                value={society}
+                onChange={(event) => setSociety(event.target.value)}
+                placeholder="Your society or community"
+                className="w-full text-sm px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl"
+              />
+            </div>
+          </div>
+
           {/* Line items section */}
           <div className="space-y-3">
             <div className="flex items-center justify-between">
@@ -327,8 +490,8 @@ export const CreateListingModal: React.FC<CreateListingModalProps> = ({
                         </label>
                         <input
                           type="number"
-                          min="1"
-                          max="200"
+                          min="0.01"
+                          step="0.01"
                           value={item.estimatedWeightKg}
                           onChange={(e) =>
                             handleItemChange(index, 'estimatedWeightKg', parseFloat(e.target.value) || 0)
@@ -394,16 +557,14 @@ export const CreateListingModal: React.FC<CreateListingModalProps> = ({
               </label>
               <div className="relative">
                 <Calendar className="w-4 h-4 text-slate-400 absolute left-3 top-3 pointer-events-none" />
-                <select
+                <input
+                  type="date"
+                  min={getTomorrowDate()}
                   value={preferredPickupDate}
                   onChange={(e) => setPreferredPickupDate(e.target.value)}
+                  required
                   className="w-full text-xs font-medium pl-9 pr-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl"
-                >
-                  <option value="Today, Oct 28">Today (Express evening slot)</option>
-                  <option value="Tomorrow, Oct 29">Tomorrow, Oct 29</option>
-                  <option value="Oct 30, Saturday">Oct 30, Saturday (Recommended for society pool)</option>
-                  <option value="Oct 31, Sunday">Oct 31, Sunday</option>
-                </select>
+                />
               </div>
             </div>
 
@@ -427,27 +588,14 @@ export const CreateListingModal: React.FC<CreateListingModalProps> = ({
             </div>
           </div>
 
-          {/* Notes for Vendor */}
-          <div>
-            <label className="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-1.5">
-              General Pickup Notes (Optional)
-            </label>
-            <input
-              type="text"
-              placeholder="e.g., Gate code is #1024, elevator available in Block B..."
-              value={generalNotes}
-              onChange={(e) => setGeneralNotes(e.target.value)}
-              className="w-full text-xs font-medium px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl"
-            />
-          </div>
-
           {/* Privacy & Locality Indicator (SRS FR-LIST-06) */}
           <div className="flex items-center gap-2.5 p-3 rounded-xl bg-slate-100 text-slate-600 text-xs">
-            <ShieldCheck className="w-4 h-4 text-emerald-700 shrink-0" />
+            <div className="flex items-center gap-2">
+              <ShieldCheck className="w-4 h-4 text-emerald-700 shrink-0" />
+              <MapPin className="w-4 h-4 text-emerald-700 shrink-0" />
+            </div>
             <div className="text-[11px] leading-relaxed">
-              <strong>Privacy Protection:</strong> Vendors will only see your general locality (
-              <span className="font-medium text-slate-800">{currentUser.locality}</span>).
-              Your exact flat/house number is kept private until you accept a vendor offer.
+              <strong>Privacy Protection:</strong> Only your locality and society are included here. Do not enter a flat number, exact address, phone number, or access code in material notes.
             </div>
           </div>
 
@@ -458,7 +606,7 @@ export const CreateListingModal: React.FC<CreateListingModalProps> = ({
                 Total Estimated Weight: <strong>{totalEstimatedWeight} kg</strong>
               </p>
               <p className="text-[11px] text-emerald-700">
-                Based on benchmark reference prices
+                Preview uses local sample rates; the saved estimate uses current Supabase benchmark rates.
               </p>
             </div>
             <div className="text-right">
@@ -468,6 +616,17 @@ export const CreateListingModal: React.FC<CreateListingModalProps> = ({
               </p>
             </div>
           </div>
+
+          {submitError && (
+            <p role="alert" className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800">
+              {submitError}
+            </p>
+          )}
+          {submitSuccess && (
+            <p role="status" className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
+              {submitSuccess}
+            </p>
+          )}
 
           {/* Submit Buttons */}
           <div className="flex items-center justify-end gap-3 pt-2">
@@ -480,10 +639,10 @@ export const CreateListingModal: React.FC<CreateListingModalProps> = ({
             </button>
             <button
               type="submit"
-              disabled={totalEstimatedWeight <= 0}
+              disabled={isSubmitting || totalEstimatedWeight <= 0 || !preferredPickupDate || !locality.trim() || !society.trim()}
               className="px-6 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold shadow-md shadow-emerald-600/20 disabled:opacity-50 transition-all"
             >
-              Publish Scrap Listing
+              {isSubmitting ? 'Saving listing...' : 'Publish Scrap Listing'}
             </button>
           </div>
         </form>

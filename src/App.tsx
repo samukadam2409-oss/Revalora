@@ -11,17 +11,152 @@ import { TransactionsHistoryView } from './components/transactions/TransactionsH
 import { SustainabilityImpactView } from './components/sustainability/SustainabilityImpactView';
 import { CreateListingModal } from './components/listings/CreateListingModal';
 import { ReceiptModal } from './components/transactions/ReceiptModal';
+import { AuthModal } from './components/auth/AuthModal';
+import { SupabaseAuthProvider } from './context/SupabaseAuthContext';
+import { useSupabaseAuth } from './context/useSupabaseAuth';
 import type { MaterialCategory, TransactionRecord } from './types';
+import { isSupabaseConfigured, supabase } from './lib/supabase';
 import {
   Recycle,
 } from 'lucide-react';
 
+type ConnectionTestStatus =
+  | { kind: 'success'; message: string }
+  | { kind: 'failure'; message: string }
+  | null;
+
+const SupabaseConnectionTest: React.FC = () => {
+  const [isTesting, setIsTesting] = useState(false);
+  const [status, setStatus] = useState<ConnectionTestStatus>(null);
+
+  const testConnection = async () => {
+    if (!isSupabaseConfigured) {
+      setStatus({
+        kind: 'failure',
+        message: 'Supabase is not configured. Check the required frontend environment variables.',
+      });
+      return;
+    }
+
+    setIsTesting(true);
+    setStatus(null);
+
+    try {
+      const { error } = await supabase
+        .from('material_benchmarks')
+        .select('category')
+        .limit(1);
+
+      if (error) {
+        setStatus({
+          kind: 'failure',
+          message: 'Connection test failed. Check your Supabase settings, network, and table read access.',
+        });
+      } else {
+        setStatus({
+          kind: 'success',
+          message: 'Connected. The read-only benchmark query succeeded.',
+        });
+      }
+    } catch {
+      setStatus({
+        kind: 'failure',
+        message: 'Connection test could not reach Supabase. Check your network and frontend settings.',
+      });
+    } finally {
+      setIsTesting(false);
+    }
+  };
+
+  return (
+    <div className="flex flex-col items-center gap-2 sm:flex-row">
+      <button
+        type="button"
+        onClick={testConnection}
+        disabled={isTesting}
+        className="rounded-lg border border-emerald-200 px-3 py-2 font-semibold text-emerald-800 transition hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-60"
+      >
+        {isTesting ? 'Testing Supabase...' : 'Test Supabase connection'}
+      </button>
+      {status && (
+        <p
+          role="status"
+          aria-live="polite"
+          className={status.kind === 'success' ? 'text-emerald-700' : 'text-rose-700'}
+        >
+          {status.message}
+        </p>
+      )}
+    </div>
+  );
+};
+
 const MainAppContent: React.FC = () => {
-  const { currentRole } = useRevalora();
+  const { currentRole, setCurrentRole } = useRevalora();
+  const { user, profile, isLoading: isAuthLoading, profileError, retryProfile, signOut } = useSupabaseAuth();
   const [activeTab, setActiveTab] = useState<string>('dashboard');
   const [isCreateListingOpen, setIsCreateListingOpen] = useState<boolean>(false);
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
   const [preselectedCategory, setPreselectedCategory] = useState<MaterialCategory | undefined>(undefined);
   const [selectedReceipt, setSelectedReceipt] = useState<TransactionRecord | null>(null);
+  const [listingRefreshToken, setListingRefreshToken] = useState(0);
+
+  React.useEffect(() => {
+    if (profile) {
+      setCurrentRole(profile.role);
+    } else if (!user && !isAuthLoading) {
+      setCurrentRole('household');
+    }
+  }, [profile, user, isAuthLoading, setCurrentRole]);
+
+  if (isAuthLoading) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-[#f7f8f4] px-4">
+        <p role="status" className="rounded-xl bg-white px-5 py-4 text-sm font-medium text-emerald-900 shadow-sm">
+          Restoring your REVALORA session...
+        </p>
+      </div>
+    );
+  }
+
+  if (profileError || (user && !profile)) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-[#f7f8f4] px-4">
+        <div className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-lg">
+          <h1 className="text-xl font-bold text-emerald-950">We could not load your account</h1>
+          <p role="alert" className="mt-3 text-sm leading-6 text-rose-800">
+            {profileError || 'Your authenticated profile could not be verified.'}
+          </p>
+          <div className="mt-5 flex flex-wrap gap-3">
+            <button
+              type="button"
+              onClick={retryProfile}
+              className="rounded-lg bg-emerald-700 px-4 py-2 font-semibold text-white hover:bg-emerald-800"
+            >
+              Try again
+            </button>
+            <button
+              type="button"
+              onClick={() => void signOut()}
+              className="rounded-lg border border-slate-300 px-4 py-2 font-semibold text-slate-700 hover:bg-slate-50"
+            >
+              Sign out
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (profile && currentRole !== profile.role) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-[#f7f8f4] px-4">
+        <p role="status" className="rounded-xl bg-white px-5 py-4 text-sm font-medium text-emerald-900 shadow-sm">
+          Loading your account view...
+        </p>
+      </div>
+    );
+  }
 
   const handleOpenCreateWithCategory = (category: MaterialCategory) => {
     setPreselectedCategory(category);
@@ -36,6 +171,7 @@ const MainAppContent: React.FC = () => {
       <Navbar
         activeTab={activeTab}
         setActiveTab={setActiveTab}
+        onOpenAuth={() => setIsAuthModalOpen(true)}
         onOpenCreateListing={() => {
           setPreselectedCategory(undefined);
           setIsCreateListingOpen(true);
@@ -55,6 +191,7 @@ const MainAppContent: React.FC = () => {
                 }}
                 onNavigateToPools={() => setActiveTab('pools')}
                 onViewReceipt={(txn) => setSelectedReceipt(txn)}
+                listingsRefreshToken={listingRefreshToken}
               />
             )}
 
@@ -110,6 +247,9 @@ const MainAppContent: React.FC = () => {
             <span className="text-emerald-800 font-medium">Built with React, TypeScript & Tailwind</span>
           </div>
         </div>
+        <div className="max-w-7xl mx-auto mt-5 flex justify-center border-t border-emerald-50 pt-5">
+          <SupabaseConnectionTest />
+        </div>
       </footer>
 
       {/* Modals */}
@@ -117,6 +257,7 @@ const MainAppContent: React.FC = () => {
         isOpen={isCreateListingOpen}
         onClose={() => setIsCreateListingOpen(false)}
         preselectedCategory={preselectedCategory}
+        onListingCreated={() => setListingRefreshToken((token) => token + 1)}
       />
 
       <ReceiptModal
@@ -124,6 +265,8 @@ const MainAppContent: React.FC = () => {
         isOpen={Boolean(selectedReceipt)}
         onClose={() => setSelectedReceipt(null)}
       />
+
+      <AuthModal isOpen={isAuthModalOpen} onClose={() => setIsAuthModalOpen(false)} />
     </div>
   );
 };
@@ -131,7 +274,9 @@ const MainAppContent: React.FC = () => {
 export default function App() {
   return (
     <RevaloraProvider>
-      <MainAppContent />
+      <SupabaseAuthProvider>
+        <MainAppContent />
+      </SupabaseAuthProvider>
     </RevaloraProvider>
   );
 }

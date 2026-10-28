@@ -13,18 +13,22 @@ import {
   Receipt,
   Layers,
   Leaf,
+  LogOut,
 } from 'lucide-react';
+import { useSupabaseAuth } from '../../context/useSupabaseAuth';
 
 interface NavbarProps {
   activeTab: string;
   setActiveTab: (tab: string) => void;
   onOpenCreateListing: () => void;
+  onOpenAuth: () => void;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
   activeTab,
   setActiveTab,
   onOpenCreateListing,
+  onOpenAuth,
 }) => {
   const {
     currentRole,
@@ -34,6 +38,8 @@ export const Navbar: React.FC<NavbarProps> = ({
     metrics,
     resetAllDemoData,
   } = useRevalora();
+  const { user, profile, signOut } = useSupabaseAuth();
+  const [signOutError, setSignOutError] = React.useState<string | null>(null);
 
   const roleOptions: { role: UserRole; label: string; icon: React.ReactNode; subtitle: string }[] = [
     {
@@ -78,35 +84,41 @@ export const Navbar: React.FC<NavbarProps> = ({
         <div className="flex items-center gap-2">
           <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 font-semibold uppercase tracking-wider text-[10px] border border-emerald-500/30">
             <Sparkles className="w-3 h-3 text-emerald-400" />
-            Hackathon Demo Mode
+            {user ? 'Authenticated · demo dashboard data' : 'Hackathon Demo Mode'}
           </span>
-          <span className="hidden sm:inline text-emerald-300/80">|</span>
-          <span className="hidden sm:inline text-slate-300">
-            Switch perspective to test end-to-end user journeys:
-          </span>
+          {!user && (
+            <>
+              <span className="hidden sm:inline text-emerald-300/80">|</span>
+              <span className="hidden sm:inline text-slate-300">
+                Switch perspective to test end-to-end user journeys:
+              </span>
+            </>
+          )}
         </div>
 
         <div className="flex items-center gap-2 overflow-x-auto py-0.5">
-          <div className="flex items-center bg-emerald-900/60 p-0.5 rounded-lg border border-emerald-800">
-            {roleOptions.map((opt) => {
-              const active = currentRole === opt.role;
-              return (
-                <button
-                  key={opt.role}
-                  onClick={() => setCurrentRole(opt.role)}
-                  className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium transition-all ${
-                    active
-                      ? 'bg-emerald-500 text-emerald-950 font-bold shadow-xs'
-                      : 'text-emerald-200/80 hover:text-white hover:bg-emerald-800/50'
-                  }`}
-                  title={`${opt.label}: ${opt.subtitle}`}
-                >
-                  {opt.icon}
-                  <span>{opt.label}</span>
-                </button>
-              );
-            })}
-          </div>
+          {!user && (
+            <div className="flex items-center bg-emerald-900/60 p-0.5 rounded-lg border border-emerald-800">
+              {roleOptions.map((opt) => {
+                const active = currentRole === opt.role;
+                return (
+                  <button
+                    key={opt.role}
+                    onClick={() => setCurrentRole(opt.role)}
+                    className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium transition-all ${
+                      active
+                        ? 'bg-emerald-500 text-emerald-950 font-bold shadow-xs'
+                        : 'text-emerald-200/80 hover:text-white hover:bg-emerald-800/50'
+                    }`}
+                    title={`${opt.label}: ${opt.subtitle}`}
+                  >
+                    {opt.icon}
+                    <span>{opt.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
 
           <button
             onClick={() => {
@@ -164,7 +176,9 @@ export const Navbar: React.FC<NavbarProps> = ({
           <div className="flex items-center gap-3">
             <div className="hidden sm:block text-right">
               <p className="text-xs font-semibold text-emerald-950">
-                {currentRole === 'household'
+                {profile
+                  ? profile.fullName
+                  : currentRole === 'household'
                   ? currentUser.name
                   : currentRole === 'coordinator'
                   ? 'Rajesh Nair (Lead)'
@@ -173,7 +187,9 @@ export const Navbar: React.FC<NavbarProps> = ({
                   : 'System Administrator'}
               </p>
               <p className="text-[11px] text-slate-500">
-                {currentRole === 'household' || currentRole === 'coordinator'
+                {profile
+                  ? `${profile.role === 'vendor' ? (profile.vendorVerified ? 'Verified vendor' : 'Vendor · verification pending') : profile.role} · ${user?.email ?? ''}`
+                  : currentRole === 'household' || currentRole === 'coordinator'
                   ? currentUser.society
                   : currentRole === 'vendor'
                   ? 'Verified Recycler ★ 4.9'
@@ -190,8 +206,37 @@ export const Navbar: React.FC<NavbarProps> = ({
                 <span>List Scrap</span>
               </button>
             )}
+
+            {user ? (
+              <button
+                type="button"
+                onClick={async () => {
+                  setSignOutError(null);
+                  const error = await signOut();
+                  if (error) setSignOutError(error);
+                }}
+                className="flex items-center gap-2 rounded-xl border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+              >
+                <LogOut className="h-4 w-4" />
+                <span className="hidden sm:inline">Sign out</span>
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={onOpenAuth}
+                className="rounded-xl border border-emerald-700 px-3 py-2 text-sm font-semibold text-emerald-800 transition hover:bg-emerald-50"
+              >
+                Sign in
+              </button>
+            )}
           </div>
         </div>
+
+        {signOutError && (
+          <p role="alert" className="pb-2 text-right text-xs text-rose-700">
+            {signOutError}
+          </p>
+        )}
 
         {/* Secondary Navigation Bar */}
         <div className="flex items-center gap-1 overflow-x-auto py-2 -mx-4 px-4 sm:mx-0 sm:px-0 border-t border-slate-100 no-scrollbar">
@@ -217,4 +262,3 @@ export const Navbar: React.FC<NavbarProps> = ({
     </header>
   );
 };
-

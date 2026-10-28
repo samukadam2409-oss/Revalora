@@ -14,17 +14,20 @@ import {
   Calendar,
 } from 'lucide-react';
 import { OfferComparisonModal } from './OfferComparisonModal';
+import { SupabaseListingsPanel } from '../listings/SupabaseListingsPanel';
 
 interface HouseholdDashboardProps {
   onOpenCreateListing: () => void;
   onNavigateToPools: () => void;
   onViewReceipt: (txn: TransactionRecord) => void;
+  listingsRefreshToken: number;
 }
 
 export const HouseholdDashboard: React.FC<HouseholdDashboardProps> = ({
   onOpenCreateListing,
   onNavigateToPools,
   onViewReceipt,
+  listingsRefreshToken,
 }) => {
   const {
     currentUser,
@@ -253,6 +256,8 @@ export const HouseholdDashboard: React.FC<HouseholdDashboardProps> = ({
         </div>
       </div>
 
+      <SupabaseListingsPanel refreshToken={listingsRefreshToken} />
+
       {/* Community Pooling Teaser Banner */}
       <div className="p-5 rounded-2xl bg-gradient-to-r from-emerald-800 to-teal-900 text-white flex flex-wrap items-center justify-between gap-4 shadow-md">
         <div className="space-y-1 max-w-xl">
@@ -279,9 +284,9 @@ export const HouseholdDashboard: React.FC<HouseholdDashboardProps> = ({
       <div className="bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden">
         <div className="p-5 border-b border-slate-100 flex flex-wrap items-center justify-between gap-3">
           <div>
-            <h3 className="font-bold text-slate-900 text-base">My Scrap Listings</h3>
+            <h3 className="font-bold text-slate-900 text-base">Demo Listings (local preview)</h3>
             <p className="text-xs text-slate-500">
-              Track requests, review vendor quotes, and schedule collections
+              These sample cards are local demo data. Use Live Scrap Listings above for Supabase records.
             </p>
           </div>
           <button
